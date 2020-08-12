@@ -1,5 +1,7 @@
-import { Frame } from "./frame";
-import * as execa from "execa";
+import { Frame, FFProbeData } from './frame';
+import * as execa from 'execa';
+import { Chunklist } from './chunklist';
+import * as HLS from 'hls-parser';
 
 // Some credits:
 // https://open.pbs.org/how-pbs-is-enabling-apples-trick-play-mode-85635372a5db
@@ -12,67 +14,39 @@ import * as execa from "execa";
 // ffprobe -print_format json -show_packets -show_frames ${inputFile}
 // Will will use this:
 // ffprobe -show_frames -select_streams v -of compact -i ${inputFile} | grep pict_type=I
-const cmdPrefix: string =
-  "ffprobe -show_frames -select_streams v -of compact -i ";
-const cmdSuffix: string = "| grep pict_type=I";
+const cmd = 'ffprobe -show_frames -select_streams v -of compact -i ';
 
 export type KeyValuePair = {
   [key: string]: string;
 };
 
 export class FFprobe {
-  public iframes: Frame[] = [];
+  public static async getFrames(
+    chunklist: Chunklist,
+    segment: HLS.types.Segment,
+  ): Promise<Frame[]> {
+    return new FFprobe(chunklist, segment).execute();
+  }
 
-  protected bitRate: number = 1;
-  protected width: number = 1280;
-  protected height: number = 720;
-  protected totalDuration: number = 0;
-  protected totalSize: number = 0;
+  public get absoluteUri(): string {
+    return new URL(this.segment.uri || '', this.chunklist.absoluteUri).href;
+  }
 
   /**
-   * ffprobe -show_frames -select_streams v -of compact -i {url}  | grep pict_type=I
+   * ffprobe -show_frames -select_streams v -of compact -i {url}
    */
   protected get command(): string {
-    return `${cmdPrefix} ${this.url} ${cmdSuffix}`;
+    return `${cmd} ${this.absoluteUri}`;
   }
 
-  protected get targetDuration(): number {
-    let maxDuration: number = 2;
-    this.iframes.forEach((frame) => {
-      maxDuration = Math.ceil(Math.max(frame.packetDurationTime, maxDuration));
-    });
-    return maxDuration;
-  }
+  private constructor(
+    public readonly chunklist: Chunklist,
+    public readonly segment: HLS.types.Segment,
+  ) {}
 
-  constructor(public readonly url: string) {}
-
-  public async generateManifest(): Promise<string> {
-    await this.execute();
-    const m3u8: string[] = [
-      "#EXTM3U",
-      "#EXT-X-VERSION:4",
-      "#EXT-X-ALLOW-CACHE:YES",
-      "#EXT-X-MEDIA-SEQUENCE: 0",
-      `#EXT-X-TARGETDURATION: ${this.targetDuration}`,
-      "#EXT-X-PLAYLIST-TYPE: VOD",
-      "#EXT-X-I-FRAMES-ONLY",
-    ];
-    this.iframes.forEach((frame: Frame) => {
-      m3u8.push("#EXTINF:" + frame.getGroupDuration().toFixed(2));
-      m3u8.push(
-        "#EXT-X-BYTERANGE:" + frame.packetSize + "@" + frame.packetPosition
-      );
-      m3u8.push("file");
-    });
-    m3u8.push("#EXT-X-ENDLIST");
-    return m3u8.join("\n");
-  }
-
-  protected async execute() {
-    try {
-      const result = await execa.command(this.command);
-      this.parse(result.stdout.split("\n"));
-    } catch (err) {}
+  protected async execute(): Promise<Frame[]> {
+    const result = await execa.command(this.command);
+    return this.parse(result.stdout.split('\n'));
   }
 
   /**
@@ -83,55 +57,21 @@ export class FFprobe {
    *
    * @param lines
    */
-  protected parse(lines: string[]) {
-    let firstDtsTime: number | null = null;
-    let prevFrame: Frame | null = null;
-    this.totalDuration = 0;
-    this.totalSize = 0;
-    lines.forEach((line: string) => {
-      // Ignore these types of lines:
-      // [https @ 0x7fc08f00f200] Opening '//URL//' for reading
-      if (!line.length || line.startsWith("[") || line.includes(" ")) {
-        return;
-      }
-      // Turn this into JSON
-      const json: KeyValuePair = {};
-      line.split("|").forEach((field: string) => {
-        const arr: string[] = field.split("=");
-        json[arr[0]] = arr[1];
-      });
-      const frame = new Frame(json);
-      // First timestamp
-      if (firstDtsTime === null) {
-        firstDtsTime = frame.packetTime;
-      }
-      // Is this a keyframe?
-      if (frame.isKeyFrame) {
-        // Add this frame to the array
-        this.iframes.push(frame);
-        // Update duration of last packet
-        if (prevFrame) {
-          prevFrame.setGroupDuration(frame.packetTime - prevFrame.packetTime);
-          // Temporarily set this current frame to the same as previous... this isn't accurate though
-          // We'll set it more for real after
-          frame.setGroupDuration(prevFrame.getGroupDuration());
-        }
-        // Save reference to last iframe
-        prevFrame = frame;
-      }
-    });
-    /*
-      TODO: Need to have the entire duration of the video to set the duration of the last GOP
-    const lastFrame: Frame = this.iframes[this.iframes.length - 1];
-    lastFrame.setGroupDuration(
-      this.video.getTotalDuration() - lastFrame.packetTime + (firstDtsTime || 0)
+  protected parse(lines: string[]): Frame[] {
+    return (
+      lines
+        .filter((line) => line.startsWith('frame'))
+        //.filter((line) => !line.includes('pict_type=I'))
+        .map((line: string) => {
+          // Turn this into JSON
+          const frameData: FFProbeData = {};
+          line.split('|').forEach((field: string) => {
+            const arr: string[] = field.split('=');
+            frameData[arr[0]] = arr[1];
+          });
+          // Return frame
+          return new Frame(frameData, this.segment.uri, this.chunklist);
+        })
     );
-    */
-    // Loop through the result, because some of the things like duration change along the way
-    this.iframes.forEach((frame: Frame) => {
-      // Add up totals
-      this.totalDuration += frame.getGroupDuration() * 1;
-      this.totalSize += frame.packetSize;
-    });
   }
 }
