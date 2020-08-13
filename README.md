@@ -1,3 +1,9 @@
 # Trickplay
 
-This isn't working yet. just a starting point.
+Generate iframe only renditions from a master playlist.
+
+Usage:
+
+```javascript
+const trickplay = await getTrickplayManifests(masterPlaylistUri);
+```

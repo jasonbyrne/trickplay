@@ -18,6 +18,10 @@ export class Chunklist {
 
   private chunklist: HLS.types.MediaPlaylist;
 
+  public get uri(): string {
+    return this.chunklistUri;
+  }
+
   public get absoluteUri(): string {
     return new URL(this.chunklistUri, this.playlist.absoluteUri).href;
   }
